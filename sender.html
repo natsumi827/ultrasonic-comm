@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>送信側｜超音波スマホ通信</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main>
+    <h1>送信側</h1>
+    <p class="lead">指定した周波数の正弦波を鳴らします。端末の音量は大きめにしてください。</p>
+
+    <section>
+      <label for="freq">周波数 [Hz]</label>
+      <input id="freq" type="number" min="15000" max="22000" step="250">
+      <div class="buttons">
+        <button id="startBtn">送信開始</button>
+        <button id="stopBtn" class="secondary" disabled>停止</button>
+      </div>
+    </section>
+
+    <section>
+      <p class="status" id="status">停止中</p>
+      <p class="note" id="info"></p>
+    </section>
+  </main>
+
+  <script src="js/common.js"></script>
+  <script>
+    const freqInput = document.getElementById('freq');
+    const startBtn  = document.getElementById('startBtn');
+    const stopBtn   = document.getElementById('stopBtn');
+    const statusEl  = document.getElementById('status');
+    const infoEl    = document.getElementById('info');
+
+    freqInput.value = CONFIG.TONE_FREQ;
+
+    let ctx  = null;  // AudioContext（音の処理全体）
+    let osc  = null;  // OscillatorNode（正弦波を作る）
+    let gain = null;  // GainNode（音量＝振幅を変える）
+
+    async function startTone() {
+      if (osc) return;
+      // ブラウザはユーザー操作なしで音を出せないので、ボタンを押したときに作る
+      if (!ctx) ctx = new AudioContext();
+      await ctx.resume();
+
+      const f = Number(freqInput.value);
+      osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+
+      gain = ctx.createGain();
+      osc.connect(gain).connect(ctx.destination);  // 発振器 → 音量 → スピーカー
+
+      // 10msかけて 0 → GAIN へ上げる（急に始めると「プチッ」と聞こえる）
+      const t = ctx.currentTime;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(CONFIG.GAIN, t + CONFIG.FADE_SEC);
+      osc.start(t);
+
+      statusEl.textContent = `送信中：${f.toLocaleString()} Hz`;
+      infoEl.textContent = `サンプリング周波数 fs = ${ctx.sampleRate} Hz`;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      freqInput.disabled = true;
+    }
+
+    function stopTone() {
+      if (!osc) return;
+      const t = ctx.currentTime;
+      // 10msかけて 0 へ下げてから止める
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(gain.gain.value, t);
+      gain.gain.linearRampToValueAtTime(0, t + CONFIG.FADE_SEC);
+      osc.stop(t + CONFIG.FADE_SEC + 0.01);
+
+      osc = null;
+      gain = null;
+      statusEl.textContent = '停止中';
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      freqInput.disabled = false;
+    }
+
+    startBtn.addEventListener('click', startTone);
+    stopBtn.addEventListener('click', stopTone);
+  </script>
+</body>
+</html>

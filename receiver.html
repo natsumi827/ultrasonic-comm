@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>受信側｜超音波スマホ通信</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main>
+    <h1>受信側</h1>
+    <p class="lead">マイクの音をFFTして、目標の周波数が鳴っているかを判定します。</p>
+
+    <section>
+      <label for="freq">目標周波数 [Hz]</label>
+      <input id="freq" type="number" min="15000" max="22000" step="250">
+      <div class="buttons">
+        <button id="startBtn">受信開始</button>
+        <button id="measureBtn" class="secondary" disabled>10秒計測</button>
+      </div>
+      <p class="note" id="info">「受信開始」を押すとマイクの許可を求められます。</p>
+    </section>
+
+    <section>
+      <div class="lamp" id="lamp"><span></span><p class="status" id="lampText">未検出</p></div>
+      <dl class="readout">
+        <div><dt>信号 [dB]</dt><dd id="sig">–</dd></div>
+        <div><dt>雑音 [dB]</dt><dd id="noise">–</dd></div>
+        <div><dt>SN比 [dB]</dt><dd id="snr">–</dd></div>
+      </dl>
+      <p class="note" id="measureResult"></p>
+    </section>
+
+    <section>
+      <canvas id="spectrum"></canvas>
+      <p class="note">15〜22kHz のスペクトル。縦線が目標周波数、横の点線が検出しきい値です。</p>
+    </section>
+  </main>
+
+  <script src="js/common.js"></script>
+  <script>
+    const freqInput  = document.getElementById('freq');
+    const startBtn   = document.getElementById('startBtn');
+    const measureBtn = document.getElementById('measureBtn');
+    const infoEl     = document.getElementById('info');
+    const lampEl     = document.getElementById('lamp');
+    const lampText   = document.getElementById('lampText');
+    const sigEl      = document.getElementById('sig');
+    const noiseEl    = document.getElementById('noise');
+    const snrEl      = document.getElementById('snr');
+    const resultEl   = document.getElementById('measureResult');
+    const canvas     = document.getElementById('spectrum');
+    const g          = canvas.getContext('2d');
+
+    freqInput.value = CONFIG.TONE_FREQ;
+
+    let ctx = null;       // AudioContext
+    let analyser = null;  // AnalyserNode（FFTをしてくれる）
+    let spec = null;      // 各ビンの強さ [dB] を入れる配列
+    let measuring = null; // 10秒計測中の合計値
+
+    async function startReceive() {
+      try {
+        // 音声通話向けの自動処理は超音波を消してしまうので、すべて切る
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+        ctx = new AudioContext();
+        await ctx.resume();
+
+        const source = ctx.createMediaStreamSource(stream);
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = CONFIG.FFT_SIZE;      // N = 2048
+        analyser.smoothingTimeConstant = 0;      // 平滑化なし（生の値を見る）
+        source.connect(analyser);                // マイク → FFT
+
+        spec = new Float32Array(analyser.frequencyBinCount); // N/2 個のビン
+        const df = ctx.sampleRate / CONFIG.FFT_SIZE;
+        infoEl.textContent = `fs = ${ctx.sampleRate} Hz、N = ${CONFIG.FFT_SIZE}、Δf = ${df.toFixed(4)} Hz`;
+        startBtn.disabled = true;
+        measureBtn.disabled = false;
+        requestAnimationFrame(loop);
+      } catch (err) {
+        infoEl.textContent = `マイクを開けませんでした（${err.name}）。HTTPS か localhost で開いているか、マイクの許可を確認してください。`;
+      }
+    }
+
+    // 画面更新のたびに呼ばれる：FFT → 信号・雑音・SN比 → 判定 → 描画
+    function loop() {
+      analyser.getFloatFrequencyData(spec);
+      const df = ctx.sampleRate / CONFIG.FFT_SIZE;
+      const db = i => (isFinite(spec[i]) ? spec[i] : -160); // 無音だと -Infinity になるため
+
+      // 目標ビン k（fs が 44.1kHz の端末もあるので毎回計算する）
+      const k = Math.round(Number(freqInput.value) / df);
+
+      // 信号：k-1〜k+1 の最大値
+      let signal = -Infinity;
+      for (let i = k - 1; i <= k + 1; i++) signal = Math.max(signal, db(i));
+
+      // 雑音：16〜21kHz のうち k±3 を除いた平均
+      const lo = Math.round(CONFIG.NOISE_LOW / df);
+      const hi = Math.min(Math.round(CONFIG.NOISE_HIGH / df), spec.length - 1);
+      let sum = 0, count = 0;
+      for (let i = lo; i <= hi; i++) {
+        if (Math.abs(i - k) <= CONFIG.NOISE_EXCLUDE) continue;
+        sum += db(i);
+        count++;
+      }
+      const noise = sum / count;
+      const snr = signal - noise;
+      const detected = snr >= CONFIG.THRESHOLD_DB;
+
+      sigEl.textContent = signal.toFixed(1);
+      noiseEl.textContent = noise.toFixed(1);
+      snrEl.textContent = snr.toFixed(1);
+      lampEl.classList.toggle('on', detected);
+      lampText.textContent = detected ? '検出' : '未検出';
+
+      if (measuring) accumulate(signal, noise, snr, detected);
+      draw(df, k, noise);
+      requestAnimationFrame(loop);
+    }
+
+    // 10秒計測：実験の表に書く平均値をとる
+    function startMeasure() {
+      measuring = { start: performance.now(), n: 0, sig: 0, noise: 0, snr: 0, hit: 0 };
+      measureBtn.disabled = true;
+      resultEl.textContent = '計測中…';
+    }
+    function accumulate(signal, noise, snr, detected) {
+      const m = measuring;
+      m.n++; m.sig += signal; m.noise += noise; m.snr += snr; if (detected) m.hit++;
+      if (performance.now() - m.start >= CONFIG.MEASURE_SEC * 1000) {
+        resultEl.textContent =
+          `${CONFIG.MEASURE_SEC}秒平均：信号 ${(m.sig / m.n).toFixed(1)} dB、` +
+          `雑音 ${(m.noise / m.n).toFixed(1)} dB、SN比 ${(m.snr / m.n).toFixed(1)} dB、` +
+          `検出率 ${(100 * m.hit / m.n).toFixed(0)}%（${m.n}回）`;
+        measuring = null;
+        measureBtn.disabled = false;
+      }
+    }
+
+    // スペクトルの描画（15〜22kHz、-140〜-20dB）
+    function draw(df, k, noise) {
+      const w = canvas.clientWidth, h = canvas.clientHeight, r = devicePixelRatio || 1;
+      if (canvas.width !== w * r) { canvas.width = w * r; canvas.height = h * r; }
+      g.setTransform(r, 0, 0, r, 0, 0);
+      const css = getComputedStyle(document.documentElement);
+      const F0 = 15000, F1 = 22000, D0 = -140, D1 = -20;
+      const x = f => (f - F0) / (F1 - F0) * w;
+      const y = d => h - (Math.max(D0, Math.min(D1, d)) - D0) / (D1 - D0) * h;
+
+      g.clearRect(0, 0, w, h);
+      // 目盛り（1kHzごと）
+      g.strokeStyle = css.getPropertyValue('--line');
+      g.fillStyle = css.getPropertyValue('--muted');
+      g.font = '11px sans-serif';
+      g.lineWidth = 1;
+      for (let f = F0; f <= F1; f += 1000) {
+        g.beginPath(); g.moveTo(x(f), 0); g.lineTo(x(f), h); g.stroke();
+        g.fillText(`${f / 1000}k`, x(f) + 2, h - 4);
+      }
+      // しきい値（雑音 + THRESHOLD_DB）
+      g.setLineDash([4, 4]);
+      g.strokeStyle = css.getPropertyValue('--muted');
+      g.beginPath(); g.moveTo(0, y(noise + CONFIG.THRESHOLD_DB)); g.lineTo(w, y(noise + CONFIG.THRESHOLD_DB)); g.stroke();
+      g.setLineDash([]);
+      // 目標周波数
+      g.strokeStyle = css.getPropertyValue('--ok');
+      g.beginPath(); g.moveTo(x(k * df), 0); g.lineTo(x(k * df), h); g.stroke();
+      // スペクトル
+      g.strokeStyle = css.getPropertyValue('--signal');
+      g.lineWidth = 1.5;
+      g.beginPath();
+      const i0 = Math.floor(F0 / df), i1 = Math.min(Math.ceil(F1 / df), spec.length - 1);
+      for (let i = i0; i <= i1; i++) {
+        const d = isFinite(spec[i]) ? spec[i] : -160;
+        i === i0 ? g.moveTo(x(i * df), y(d)) : g.lineTo(x(i * df), y(d));
+      }
+      g.stroke();
+    }
+
+    startBtn.addEventListener('click', startReceive);
+    measureBtn.addEventListener('click', startMeasure);
+  </script>
+</body>
+</html>
