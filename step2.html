@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>聞こえない音で送る — 超音波4-FSK通信</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #edf0f5; --surface: #f8f9fc; --ink: #18213d; --muted: #5c6685;
+    --line: #c9d0de; --accent: #6a4ce0; --accent-ink: #ffffff;
+    --ok: #1f8a5b; --ng: #c23b4a;
+    --spec-lo: #18213d; --spec-mid: #6a4ce0; --spec-hi: #f2eeff;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10152a; --surface: #171d36; --ink: #e4e8f4; --muted: #95a0bf;
+      --line: #2a3352; --accent: #9c86ff; --accent-ink: #10152a;
+      --ok: #4cc28c; --ng: #ff7d8a;
+      --spec-lo: #0a0e1e; --spec-mid: #7b62ff; --spec-hi: #f2eeff;
+    }
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+    font-size: 16px; line-height: 1.7;
+    font-variant-numeric: tabular-nums;
+  }
+  main { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1.1rem 3rem; }
+  h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 .35rem; font-weight: 700; letter-spacing: .02em; }
+  .lede { margin: 0 0 1.4rem; color: var(--muted); font-size: .95rem; }
+
+  .tabs { display: flex; gap: .3rem; border-bottom: 1px solid var(--line); margin-bottom: 1.4rem; }
+  .tabs button {
+    flex: 1; background: none; border: none; color: var(--muted); font: inherit; font-weight: 500;
+    padding: .65rem .2rem; border-bottom: 3px solid transparent; margin-bottom: -1px; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 700; }
+  section[hidden] { display: none; }
+
+  label { display: block; font-weight: 500; margin-bottom: .35rem; }
+  textarea, input[type="text"] {
+    width: 100%; font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 6px; padding: .6rem .7rem;
+  }
+  textarea { min-height: 5.5rem; resize: vertical; }
+  .hint { color: var(--muted); font-size: .85rem; margin: .3rem 0 0; }
+  .hint.over { color: var(--ng); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0; }
+  .btn {
+    font: inherit; font-weight: 700; border-radius: 6px; padding: .7rem 1.2rem; cursor: pointer;
+    background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent);
+  }
+  .btn.quiet { background: transparent; color: var(--ink); border-color: var(--line); font-weight: 500; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); }
+
+  /* 受信画面の主役：スペクトログラム */
+  .scope { position: relative; border-radius: 8px; overflow: hidden; background: var(--spec-lo); }
+  .scope canvas { display: block; width: 100%; height: 220px; }
+  .scope .mark {
+    position: absolute; right: 0; left: 0; height: 0;
+    border-top: 1px dashed rgba(255,255,255,.28); pointer-events: none;
+  }
+  .scope .mark span {
+    position: absolute; right: .4rem; top: -.75rem; font-size: .7rem; color: rgba(255,255,255,.75);
+  }
+  .scope-caption { display: flex; justify-content: space-between; color: var(--muted); font-size: .8rem; margin-top: .3rem; }
+
+  .status { margin: 1rem 0 .4rem; font-weight: 500; min-height: 1.7em; }
+  .log { list-style: none; padding: 0; margin: 0; }
+  .log li { border-top: 1px solid var(--line); padding: .8rem 0; }
+  .log .msg { font-size: 1.15rem; font-weight: 700; word-break: break-all; }
+  .log .meta { color: var(--muted); font-size: .82rem; }
+  .ok { color: var(--ok); } .ng { color: var(--ng); }
+
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; margin-top: .6rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+  .bar { height: .55rem; background: var(--accent); border-radius: 2px; }
+  .result { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: .8rem; margin-top: .6rem; }
+  footer { color: var(--muted); font-size: .8rem; margin-top: 2.5rem; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>聞こえない音で送る</h1>
+  <p class="lede">18〜19.2kHzの音にメッセージを載せて、スマホのスピーカーから別のスマホのマイクへ届けます。片方で「受け取る」を開いてから、もう片方で送ってください。</p>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="send">送る</button>
+    <button role="tab" aria-selected="false" data-tab="recv">受け取る</button>
+    <button role="tab" aria-selected="false" data-tab="sim">雑音で試す</button>
+  </nav>
+
+  <section id="send">
+    <label for="sendText">メッセージ</label>
+    <textarea id="sendText">こんにちは、超音波です</textarea>
+    <p class="hint" id="sendInfo"></p>
+    <div class="actions">
+      <button class="btn" id="sendBtn">送信する</button>
+      <button class="btn quiet" id="toneBtn">18.8kHzを2秒鳴らす</button>
+    </div>
+    <div class="progress"><div id="sendBar"></div></div>
+    <p class="hint">音量は最大近くまで上げてください。耳元に近づけない限り、ほとんどの人には聞こえません。</p>
+  </section>
+
+  <section id="recv" hidden>
+    <div class="scope" id="scope">
+      <canvas id="spec"></canvas>
+    </div>
+    <div class="scope-caption"><span>右端が最新</span><span>16〜20.5kHz</span></div>
+    <div class="actions">
+      <button class="btn" id="recvBtn">受信を始める</button>
+    </div>
+    <p class="status" id="recvStatus">マイクを許可すると、受信を待ちはじめます。</p>
+    <ul class="log" id="recvLog"></ul>
+  </section>
+
+  <section id="sim" hidden>
+    <label for="simText">メッセージ</label>
+    <input type="text" id="simText" value="Hello 超音波!">
+    <label for="snr" style="margin-top:1rem">SNR（全帯域）: <span id="snrVal">0</span> dB</label>
+    <input type="range" id="snr" min="-25" max="20" step="1" value="0">
+    <div class="actions">
+      <button class="btn" id="simBtn">1回試す</button>
+      <button class="btn quiet" id="sweepBtn">SNRを変えて各10回</button>
+    </div>
+    <div id="simOut"></div>
+  </section>
+
+  <footer>信号処理 自由課題 / 変調・同期・フィルタ・FFT・誤り訂正はすべて自前実装</footer>
+</main>
+<script src="js/dsp.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
