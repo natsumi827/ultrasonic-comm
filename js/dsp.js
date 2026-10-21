@@ -5,7 +5,9 @@
 
   // ===== パラメータ =====
   const CONFIG = {
-    freqs: [18000, 18400, 18800, 19200], // 4-FSKの搬送周波数 [Hz]（間隔400Hz）
+    freqs: [18000, 18400, 18800, 19200], // 4-FSKの搬送周波数 [Hz]（偶数番目のシンボル）
+    freqsAlt: [18200, 18600, 19000, 19400], // 奇数番目のシンボル用（残響対策で交互に使う）
+    alternate: true,   // 偶数・奇数で周波数の組を切り替える
     symDur: 0.040,     // 1シンボルの長さ [s]
     rampDur: 0.003,    // シンボル両端のフェード [s]（クリック音＝可聴域への漏れ対策）
     winStart: 0.008,   // 解析窓の開始位置 [s]（直前シンボルの残響を避ける）
@@ -21,6 +23,8 @@
     amplitude: 0.7,    // 送信振幅
     maxBytes: 48,      // 1フレームの最大ペイロード [byte]
     detectThreshold: 0.25, // 正規化相関の同期判定しきい値
+    interleave: true,  // インターリーブ（連続誤りをばらして訂正できるようにする）
+    equalize: true,    // 周波数ごとの受信強度の差を補正する
   };
 
   // ===== 誤り検出: CRC-8（多項式 x^8+x^2+x+1 = 0x07）=====
@@ -88,6 +92,65 @@
     return { bytes, corrections };
   }
 
+  // ===== インターリーブ（ブロック型）=====
+  // n個の符号語（各7ビット）を n行×7列 に並べ、列方向に読み出す。
+  // 送信で隣り合うビットは別々の符号語に属するので、連続誤り（バースト誤り）が
+  // 各符号語に1ビットずつ散らばり、ハミング符号で訂正できるようになる。
+  function interleave(bits) {
+    const n = bits.length / 7, out = [];
+    for (let c = 0; c < 7; c++) for (let r = 0; r < n; r++) out.push(bits[r * 7 + c]);
+    return out;
+  }
+  function deinterleave(bits) {
+    const n = bits.length / 7, out = new Array(bits.length);
+    let i = 0;
+    for (let c = 0; c < 7; c++) for (let r = 0; r < n; r++) out[r * 7 + c] = bits[i++];
+    return out;
+  }
+
+  function hammingBits(bytes) {
+    const bits = [];
+    for (const b of bytes) bits.push(...hammingEncode(b >> 4), ...hammingEncode(b & 0x0f));
+    return bits;
+  }
+  function bitsToSyms(bits) {
+    const syms = [];
+    for (let i = 0; i < bits.length; i += 2) syms.push(toGray((bits[i] << 1) | bits[i + 1]));
+    return syms;
+  }
+  function symsToBits(syms) {
+    const bits = [];
+    for (const g of syms) { const v = fromGray(g); bits.push((v >> 1) & 1, v & 1); }
+    return bits;
+  }
+  function decodeHammingBits(bits) {
+    const bytes = [];
+    let corrections = 0;
+    for (let i = 0; i + 14 <= bits.length; i += 14) {
+      const hi = hammingDecode(bits.slice(i, i + 7));
+      const lo = hammingDecode(bits.slice(i + 7, i + 14));
+      corrections += hi.corrected + lo.corrected;
+      bytes.push((hi.nibble << 4) | lo.nibble);
+    }
+    return { bytes, corrections };
+  }
+
+  // フレーム → シンボル列。先頭の長さ1バイト（ヘッダ）は、受信側が先に読めるよう
+  // 単独でインターリーブし、残り（本文＋CRC）はまとめてインターリーブする。
+  function frameToSymbols(frame, cfg = CONFIG) {
+    const il = cfg.interleave ? interleave : (b) => b;
+    return [
+      ...bitsToSyms(il(hammingBits(frame.slice(0, 1)))),
+      ...bitsToSyms(il(hammingBits(frame.slice(1)))),
+    ];
+  }
+  function symbolsToFrame(syms, cfg = CONFIG) {
+    const dil = cfg.interleave ? deinterleave : (b) => b;
+    const head = decodeHammingBits(dil(symsToBits(syms.slice(0, 7))));
+    const body = decodeHammingBits(dil(symsToBits(syms.slice(7))));
+    return { bytes: [...head.bytes, ...body.bytes], corrections: head.corrections + body.corrections };
+  }
+
   // フレーム: [長さ][ペイロード...][CRC-8]
   function buildFrame(payload) {
     const body = [payload.length, ...payload];
@@ -123,12 +186,17 @@
     return applyRamp(x, rampN);
   }
 
+  // i番目のシンボルで使う周波数の組。前のシンボルの反射音が次の判定に混ざらないよう交互にする
+  function freqsFor(i, cfg = CONFIG) {
+    return cfg.alternate && i % 2 === 1 ? cfg.freqsAlt : cfg.freqs;
+  }
+
   // テキスト（UTF-8バイト列）→ 送信波形
   function modulate(payload, fs, cfg = CONFIG) {
     if (payload.length < 1 || payload.length > cfg.maxBytes) {
       throw new Error(`メッセージは1〜${cfg.maxBytes}バイトにしてください`);
     }
-    const syms = bytesToSymbols(buildFrame(payload));
+    const syms = frameToSymbols(buildFrame(payload), cfg);
     const chirp = makeChirp(fs, cfg);
     const symN = Math.round(cfg.symDur * fs);
     const gapN = Math.round(cfg.gapDur * fs);
@@ -136,9 +204,10 @@
     const rampN = Math.round(cfg.rampDur * fs);
     const out = new Float32Array(padN + chirp.length + gapN + syms.length * symN + padN);
     let p = padN;
+    let idx = 0;
     out.set(chirp, p); p += chirp.length + gapN;
     for (const s of syms) {
-      out.set(makeTone(fs, cfg.freqs[s], symN, rampN), p);
+      out.set(makeTone(fs, freqsFor(idx++, cfg)[s], symN, rampN), p);
       p += symN;
     }
     for (let i = 0; i < out.length; i++) out[i] *= cfg.amplitude;
@@ -311,6 +380,13 @@
     }
 
     push(raw) {
+      // 音割れ検知: 振幅が上限近くに張り付いたサンプルが多ければ知らせる（1秒に1回まで）
+      let clipped = 0;
+      for (let i = 0; i < raw.length; i++) if (Math.abs(raw[i]) >= 0.99) clipped++;
+      if (clipped > raw.length * 0.001 && this.end - (this.lastClip ?? -Infinity) > this.fs) {
+        this.lastClip = this.end;
+        this.onEvent({ type: 'clip', ratio: clipped / raw.length });
+      }
       this.append(this.filter.process(raw));
       let progressed = true;
       while (progressed) {
@@ -337,25 +413,49 @@
       return true;
     }
 
-    decodeSymbols(firstSym, count) {
-      const syms = [], energies = [];
-      for (let i = firstSym; i < firstSym + count; i++) {
+    // 各シンボルの4周波数の電力をGoertzelで求める
+    measure(count) {
+      const energies = [];
+      for (let i = 0; i < count; i++) {
         const start = this.at(this.dataStart + i * this.symN + this.winOff);
-        const p = this.cfg.freqs.map((f) => goertzelPower(this.buf, start, this.winN, f, this.fs, this.win));
-        let k = 0;
-        for (let j = 1; j < p.length; j++) if (p[j] > p[k]) k = j;
-        syms.push(k);
-        energies.push(p);
+        energies.push(freqsFor(i, this.cfg).map((f) => goertzelPower(this.buf, start, this.winN, f, this.fs, this.win)));
       }
-      return { syms, energies };
+      return energies;
+    }
+
+    // 周波数ごとの受信強度（チャネル利得）を推定する。
+    // 各周波数は全シンボルのおよそ1/4で鳴っているので、その周波数の電力の上位1/4の平均を
+    // 「その周波数が鳴ったときの強さ」とみなす。
+    estimateGains(energies) {
+      const K = this.cfg.freqs.length;
+      const est = (rows) => {
+        const g = [];
+        for (let j = 0; j < K; j++) {
+          const v = rows.map((p) => p[j]).sort((a, b) => b - a);
+          const top = v.slice(0, Math.max(1, Math.floor(v.length / K)));
+          g.push(top.reduce((a, b) => a + b, 0) / top.length + 1e-20);
+        }
+        return g;
+      };
+      if (!this.cfg.alternate) return [est(energies)];
+      return [est(energies.filter((_, i) => i % 2 === 0)), est(energies.filter((_, i) => i % 2 === 1))];
+    }
+
+    decide(energies, gains) {
+      return energies.map((p, i) => {
+        const g = gains ? gains[gains.length === 1 ? 0 : i % 2] : null;
+        let k = 0, best = -1;
+        p.forEach((v, j) => { const s = g ? v / g[j] : v; if (s > best) { best = s; k = j; } });
+        return k;
+      });
     }
 
     tryDecode() {
       const need = (nSym) => this.dataStart + nSym * this.symN;
       if (this.frameLen === null) {
         if (this.end < need(7)) return false;
-        const { syms } = this.decodeSymbols(0, 7);
-        const len = symbolsToBytes(syms).bytes[0];
+        const syms = this.decide(this.measure(7), null);
+        const len = symbolsToFrame(syms, this.cfg).bytes[0];
         if (len < 1 || len > this.cfg.maxBytes) {
           this.onEvent({ type: 'error', message: '長さ情報が読み取れませんでした（雑音か、途中から受信した可能性）' });
           this.state = 'search';
@@ -367,14 +467,20 @@
       }
       const total = (this.frameLen + 2) * 7;
       if (this.end < need(total)) return false;
-      const { syms, energies } = this.decodeSymbols(0, total);
-      const { bytes, corrections } = symbolsToBytes(syms);
+      const energies = this.measure(total);
+      const gains = this.estimateGains(energies);
+      const syms = this.decide(energies, this.cfg.equalize ? gains : null);
+      const { bytes, corrections } = symbolsToFrame(syms, this.cfg);
       const body = bytes.slice(0, -1);
-      const crcOk = crc8(body) === bytes[bytes.length - 1];
+      const crcOk = body[0] === this.frameLen && crc8(body) === bytes[bytes.length - 1];
       const payload = body.slice(1);
+      const flat = gains.length === 1 ? gains[0] : gains[0].flatMap((g, j) => [g, gains[1][j]]);
+      const gmax = Math.max(...flat);
       this.onEvent({
         type: 'frame', bytes: payload, crcOk, corrections,
         syncScore: this.syncScore, energies, symbols: syms,
+        endSample: need(total), nowSample: this.end, // フレームの終わりと今の位置（タイミング合わせ用）
+        gainsDb: flat.map((g) => 10 * Math.log10(g / gmax)),
       });
       this.state = 'search';
       this.searchFrom = need(total);
@@ -390,9 +496,38 @@
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
 
+  // 部屋の残響をまねる: 2〜80msに散らばった反射音が、時間とともに指数的に弱まる
+  function addEcho(x, fs) {
+    const y = Float32Array.from(x);
+    for (let k = 0; k < 25; k++) {
+      const delay = 0.002 + Math.random() * 0.078;
+      const gain = 0.9 * Math.exp(-delay / 0.03) * (Math.random() < 0.5 ? -1 : 1);
+      const d = Math.round(delay * fs);
+      for (let i = d; i < x.length; i++) y[i] += gain * x[i - d];
+    }
+    return y;
+  }
+
+  // 2次ローパス（双二次フィルタ）: スピーカーやマイクで高い周波数ほど弱くなる特性をまねる
+  function lowpass(x, fs, fc, Q) {
+    const w = 2 * Math.PI * fc / fs, al = Math.sin(w) / (2 * Q), cw = Math.cos(w);
+    const a0 = 1 + al;
+    const b0 = (1 - cw) / 2 / a0, b1 = (1 - cw) / a0, b2 = b0, a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+    const y = new Float32Array(x.length);
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const v = b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v;
+    }
+    return y;
+  }
+
   // snrDb: 信号が鳴っている区間の平均電力 ÷ 雑音電力（dB）
-  function simulate(payload, snrDb, fs, cfg = CONFIG) {
-    const sig = modulate(payload, fs, cfg);
+  // opts.echo: 残響あり, opts.tilt: 高い周波数ほど弱くなる特性（スピーカー・マイクの癖）
+  function simulate(payload, snrDb, fs, cfg = CONFIG, opts = {}) {
+    let sig = modulate(payload, fs, cfg);
+    if (opts.tilt) sig = lowpass(lowpass(sig, fs, 17500, 0.7), fs, 17500, 0.7);
+    if (opts.echo) sig = addEcho(sig, fs);
     const lead = Math.round((0.3 + Math.random() * 0.5) * fs);
     const x = new Float32Array(lead + sig.length + Math.round(0.5 * fs));
     x.set(sig, lead);
@@ -410,9 +545,9 @@
 
   const api = {
     CONFIG, crc8, hammingEncode, hammingDecode, toGray, fromGray,
-    bytesToSymbols, symbolsToBytes, buildFrame, makeChirp, modulate, frameDuration,
+    bytesToSymbols, symbolsToBytes, interleave, deinterleave, frameToSymbols, symbolsToFrame, buildFrame, makeChirp, modulate, frameDuration,
     designBandpass, FIRFilter, fft, normalizedXcorr, goertzelPower, hannWindow,
-    Receiver, simulate,
+    Receiver, simulate, freqsFor,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else global.DSP = api;

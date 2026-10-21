@@ -3,6 +3,8 @@
   'use strict';
   const $ = (id) => document.getElementById(id);
   const C = DSP.CONFIG;
+  // 表示用: 使う周波数を低い順に並べる（交互に使う2組を合わせた8つ）
+  const allFreqs = () => (C.alternate ? C.freqs.flatMap((f, j) => [f, C.freqsAlt[j]]) : C.freqs);
   const enc = new TextEncoder();
   const dec = new TextDecoder('utf-8', { fatal: false });
 
@@ -86,6 +88,7 @@
     if (e.type === 'sync') status(`同期信号を検出（相関 ${e.score.toFixed(2)}）`);
     else if (e.type === 'header') status(`受信中…（${e.length}バイト）`);
     else if (e.type === 'error') status(e.message);
+    else if (e.type === 'clip') status('音が大きすぎてマイクが音割れしています。スピーカーや話している人から少し離してください');
     else if (e.type === 'frame') {
       const li = document.createElement('li');
       const text = dec.decode(new Uint8Array(e.bytes));
@@ -94,7 +97,9 @@
       li.querySelector('.msg').textContent = text;
       li.querySelector('.meta').innerHTML =
         `${time}　<span class="${e.crcOk ? 'ok' : 'ng'}">${e.crcOk ? 'CRC一致' : 'CRC不一致（誤りあり）'}</span>` +
-        `　訂正 ${e.corrections}ビット　同期相関 ${e.syncScore.toFixed(2)}`;
+        `　訂正 ${e.corrections}ビット　同期相関 ${e.syncScore.toFixed(2)}` +
+        `<br>周波数ごとの強さ（最大を0dB）: ` +
+        allFreqs().map((f, j) => `${(f / 1000).toFixed(1)}k ${e.gainsDb[j].toFixed(0)}dB`).join(' / ');
       $('recvLog').prepend(li);
       status('受信を待っています');
     }
@@ -162,11 +167,11 @@
     g.fillRect(0, 0, w, h);
     // 4つの搬送周波数に目印
     document.querySelectorAll('.scope .mark').forEach((m) => m.remove());
-    C.freqs.forEach((f) => {
+    allFreqs().forEach((f) => {
       const m = document.createElement('div');
       m.className = 'mark';
       m.style.top = ((F_HI - f) / (F_HI - F_LO) * 100) + '%';
-      m.innerHTML = `<span>${(f / 1000).toFixed(1)}k</span>`;
+      m.innerHTML = C.freqs.includes(f) ? `<span>${(f / 1000).toFixed(1)}k</span>` : '';
       $('scope').appendChild(m);
     });
   }
@@ -202,7 +207,8 @@
   $('snr').addEventListener('input', () => { $('snrVal').textContent = $('snr').value; });
 
   function runOnce(payload, snr) {
-    const ev = DSP.simulate(payload, snr, 48000);
+    const opts = { echo: $('echo').checked, tilt: $('echo').checked };
+    const ev = DSP.simulate(payload, snr, 48000, C, opts);
     const f = ev.find((e) => e.type === 'frame');
     return { ev, f };
   }
