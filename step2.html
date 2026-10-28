@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>聞こえない音で送る</h1>
-  <p class="lede">18〜19.2kHzの音にメッセージを載せて、スマホのスピーカーから別のスマホのマイクへ届けます。片方で「受け取る」を開いてから、もう片方で送ってください。</p>
+  <p class="lede">18〜19.4kHzの音にメッセージを載せて、スマホのスピーカーから別のスマホのマイクへ届けます。片方で「受け取る」を開いてから、もう片方で送ってください。</p>
 
   <nav class="tabs" role="tablist">
     <button role="tab" aria-selected="true" data-tab="send">送る</button>
@@ -135,6 +135,7 @@
     <input type="text" id="simText" value="Hello 超音波!">
     <label for="snr" style="margin-top:1rem">SNR（全帯域）: <span id="snrVal">0</span> dB</label>
     <input type="range" id="snr" min="-25" max="20" step="1" value="0">
+    <label style="margin-top:.8rem;font-weight:400"><input type="checkbox" id="echo" checked> 教室の残響と、高い音ほど弱くなる特性もまねる</label>
     <div class="actions">
       <button class="btn" id="simBtn">1回試す</button>
       <button class="btn quiet" id="sweepBtn">SNRを変えて各10回</button>

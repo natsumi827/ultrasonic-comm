@@ -1,20 +1,36 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>超音波スマホ通信</title>
-  <link rel="stylesheet" href="css/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>超音波スマホ通信</title>
+<style>
+  :root { --bg:#edf0f5; --ink:#18213d; --muted:#5c6685; --line:#c9d0de; --accent:#6a4ce0;
+    box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px); }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10152a; --ink:#e4e8f4; --muted:#95a0bf; --line:#2a3352; --accent:#9c86ff; } }
+  body { margin:0; background:var(--bg); color:var(--ink); line-height:1.7;
+    font-family:"Hiragino Sans","Yu Gothic",system-ui,sans-serif; }
+  main { max-width:40rem; margin:0 auto; padding:1.5rem 1.1rem 3rem; }
+  h1 { font-size:1.8rem; margin:0 0 .3rem; }
+  p { color:var(--muted); margin:0 0 1.2rem; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { border-top:1px solid var(--line); }
+  li:last-child { border-bottom:1px solid var(--line); }
+  a { display:block; padding:.9rem .2rem; color:var(--ink); text-decoration:none; font-weight:700; }
+  a span { display:block; font-weight:400; font-size:.88rem; color:var(--muted); }
+  a:hover, a:focus-visible { color:var(--accent); }
+</style>
 </head>
 <body>
-  <main>
-    <h1>超音波スマホ通信</h1>
-    <p class="lead">Step1：18,750Hzの音を鳴らして、もう1台で検出します。</p>
-    <ul class="links">
-      <li><a href="sender.html">送信側を開く</a></li>
-      <li><a href="receiver.html">受信側を開く</a></li>
-      <li><a href="step2.html">Step2：4-FSKでテキスト送受信</a></li>
-    </ul>
-  </main>
+<main>
+  <h1>超音波スマホ通信</h1>
+  <p>信号処理 自由課題。聞こえない音（約18〜19kHz）で、スマホ同士が通信します。</p>
+  <ul>
+    <li><a href="sender.html">Step1：送信側<span>18,750Hzの音を鳴らす</span></a></li>
+    <li><a href="receiver.html">Step1：受信側<span>18,750Hzの音を検出する</span></a></li>
+    <li><a href="step2.html">Step2：4-FSKでテキスト送受信<span>同期・フィルタ・誤り訂正・残響対策</span></a></li>
+    <li><a href="step3.html">Step3：超音波で出欠をとる<span>スロットALOHAとスロット数の自動制御</span></a></li>
+  </ul>
+</main>
 </body>
 </html>
